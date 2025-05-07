@@ -23,7 +23,9 @@ ui <- fluidPage(
         selectInput("unidad_periodo", "Unidad de los periodos:",
                     choices = c("Años", "Meses", "Quincenas", "Días")),
         textInput("pago", "Pago por periodo (puede ser 'Calculalo'):", value = "Calculalo")
-      ),
+      ),   
+      
+      
       conditionalPanel(
         condition = "input.tema == 'TIR'",
         textInput("flujos", "Flujos de efectivo separados por coma (ej. -1000,200,300,400):", value = "-1000,300,400,500")
@@ -84,6 +86,8 @@ server <- function(input, output) {
           f <- function(n) capital * (tasa_periodo * (1 + tasa_periodo)^n) / ((1 + tasa_periodo)^n - 1) - pago
           n_periodos <- round(uniroot(f, c(1, 600))$root)
         }
+        
+        
         saldo <- capital
         tabla <- data.frame(Periodo = 0:n_periodos, Pago = NA, Interés = NA, Amortización = NA, Saldo = NA)
         tabla[1, ] <- c(0, 0, 0, 0, round(saldo, 2))
@@ -139,6 +143,8 @@ server <- function(input, output) {
     }
     return(NULL)
   })
+  
+  
   output$tabla <- renderDT({
     req(input$tema != "")
     datos()
@@ -167,6 +173,7 @@ server <- function(input, output) {
       cat("Número de periodos:", round(resumen$n, 2), "\n")
       cat("Pago periódico:", round(resumen$pago, 2), "\n")
     }
+    
   })
 }
 shinyApp(ui, server)
