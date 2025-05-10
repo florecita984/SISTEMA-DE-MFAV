@@ -15,13 +15,25 @@ ui <- fluidPage(
         radioButtons("tipo_tasa", "Tipo de tasa:",
                      choices = c("Nominal convertible", "Efectiva"),
                      selected = "Nominal convertible"),
+        conditionalPanel(
+          condition = "input.tipo_tasa == 'Nominal convertible'",
+          selectInput("frecuencia_conversion", "Frecuencia de conversión de la tasa nominal:",
+                      choices = c("Anual" = 1, "Semestral" = 2, "Trimestral" = 4, "Bimestral"= 6, "Mensual" = 12), selected = 2)
+        ),
         textInput("capital", "Monto presente o futuro (puede ser 'Calculalo'):", value = "10000"),
         textInput("tasa", "Tasa de interés (puede ser 'Calculalo'):", value = "10"),
         selectInput("unidad_tasa", "Unidad de la tasa de interés:",
                     choices = c("Anual", "Mensual", "Quincenal", "Diaria")),
+        uiOutput("tasa_ui"),
+        conditionalPanel(
+          condition = "input.tipo_tasa == 'Efectiva'",
+          selectInput("unidad_tasa", "Unidad del periodo de capitalización (para convertir la tasa efectiva anual):",
+                      choices = c("Anual", "Mensual", "Quincenal", "Diaria"))
+        ),
         textInput("periodos", "Número de periodos (puede ser 'Calculalo'):", value = "5"),
         selectInput("unidad_periodo", "Unidad de los periodos:",
                     choices = c("Años", "Meses", "Quincenas", "Días")),
+                    choices = c("Años","Semestres","Bimestrales", "Meses", "Quincenas", "Días")),
         textInput("pago", "Pago por periodo (puede ser 'Calculalo'):", value = "Calculalo")
       ),   
       
@@ -48,6 +60,15 @@ ui <- fluidPage(
 )
 #la lógica del servidor
 server <- function(input, output) {
+  output$tasa_ui <- renderUI({
+    tipo <- input$tipo_tasa
+    label <- if (tipo == "Nominal convertible") {
+      "Tasa nominal anual (%) (puedes poner 'Calculalo'):"
+    } else {
+      "Tasa efectiva anual (%) (puedes poner 'Calculalo'):"
+    }
+    textInput("tasa", label, value = "10")
+  })
   datos <- reactive({
     if (input$tema == "Tablas de Amortización / Ahorro") {
       unidad_tasa_map <- c(Anual = 1, Mensual = 12, Quincenal = 24, Diaria = 360)
