@@ -111,6 +111,17 @@ server <- function(input, output) {
         } else if (is.na(n_periodos)) {
           f <- function(n) capital * (tasa_periodo * (1 + tasa_periodo)^n) / ((1 + tasa_periodo)^n - 1) - pago
           n_periodos <- round(uniroot(f, c(1, 600))$root)
+        # Calcular pago final faltante si se pone 0 o "auto"
+        if (tolower(input$valor_final) %in% c("auto", "calculalo", "0")) {
+          saldo_temp <- capital
+          for (pago in pagos_vec) {
+            interes <- saldo_temp * tasa_periodo
+            amort <- pago - interes
+            saldo_temp <- saldo_temp - amort
+          }
+          pago_final <- saldo_temp * (1 + tasa_periodo)  # asumiendo que se paga con interés al siguiente periodo
+        } else {
+          pago_final <- as.numeric(input$valor_final)
         }
         
         
