@@ -36,6 +36,11 @@ ui <- fluidPage(
                     choices = c("Años","Semestres","Bimestrales", "Meses", "Quincenas", "Días")),
         textInput("pago", "Pago por periodo (puede ser 'Calculalo'):", value = "Calculalo")
       ),   
+          condition = "!input.pagos_personalizados",
+          textInput("pago", "Pago por periodo (puede ser 'Calculalo'):", value = "Calculalo")
+        )
+        ),   
+      checkboxInput("pagos_personalizados", "¿Usar pagos personalizados?", value = FALSE),
       
       
       conditionalPanel(
