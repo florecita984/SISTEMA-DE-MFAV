@@ -88,6 +88,13 @@ server <- function(input, output) {
           tasa_periodo <- tasa / unidad_tasa_map[input$unidad_tasa]
         } else if (input$tipo_tasa == "Efectiva") {
           tasa_periodo <- (1 + tasa)^(1 / unidad_tasa_map[input$unidad_tasa]) - 1
+          # ✅ Solución inteligente: si tasa < 1.5, asumimos que ya es por periodo (como 0.4%)
+          if (tasa < 1.5) {
+            tasa_periodo <- tasa  # Ya es la tasa por periodo (ej. 0.004)
+          } else {
+            # Si se da como anual (ej. 12%), la convertimos al periodo seleccionado
+            tasa_periodo <- (1 + tasa)^(1 / unidad_tasa_map[input$unidad_tasa]) - 1
+          }
         }
       } else {
         tasa_periodo <- NA
