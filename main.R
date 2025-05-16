@@ -163,6 +163,12 @@ server <- function(input, output) {
           saldo <- saldo + amort
           tabla[t + 1, ] <- c(t, round(pago, 2), round(interes, 2), round(amort, 2), round(saldo, 2))
         }
+     else if (tipo == "Ahorro") {
+      tipo_anualidad <- input$Tipo_anualidad
+      k <- if (tipo_anualidad == "Diferida") as.numeric(input$diferido) else 0
+      ajuste <- if (tipo_anualidad == "Anticipada") 1 + tasa_periodo else 1
+      
+      ultimo_periodo_incompleto <- FALSE
       }
       attr(tabla, "resultado") <- list(
         capital = capital,
