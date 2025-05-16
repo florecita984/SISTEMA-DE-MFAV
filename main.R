@@ -169,6 +169,13 @@ server <- function(input, output) {
       ajuste <- if (tipo_anualidad == "Anticipada") 1 + tasa_periodo else 1
       
       ultimo_periodo_incompleto <- FALSE
+        n_periodos <- floor(n_decimal)
+      }
+      if (isTRUE(ultimo_periodo_incompleto)) {
+        interes <- saldo * tasa_periodo
+        ultimo_pago <- saldo + interes
+        saldo <- 0
+        tabla[nrow(tabla) + 1, ] <- c(n_periodos + k + 1, round(ultimo_pago, 2), round(interes, 2), round(ultimo_pago, 2), round(saldo, 2))
       }
       attr(tabla, "resultado") <- list(
         capital = capital,
