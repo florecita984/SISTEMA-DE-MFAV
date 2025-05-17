@@ -1,128 +1,657 @@
 library(shiny) #este no se 
 library(DT)
 library(ggplot2)
+
+# Constantes y mapeos globales
+UNIDAD_TASA_MAP <- c(Anual = 1, Bimestral = 6, Mensual = 12, Quincenal = 24, Diaria = 360)
+UNIDAD_PERIODO_MAP <- c(Años = 1, Semestres = 2, Bimestrales = 6, Meses = 12, Quincenas = 24, Días = 360)
+
+# Funciones auxiliares para manejo de entrada
+obtener_valores_entrada <- function(input) {
+  # Leer inputs básicos
+  capital <- suppressWarnings(ifelse(tolower(input$capital) %in% c("calculalo", ""), NA, as.numeric(input$capital)))
+  tasa <- suppressWarnings(ifelse(tolower(input$tasa) %in% c("calculalo", ""), NA, as.numeric(input$tasa))) / 100
+  n <- suppressWarnings(ifelse(tolower(input$periodos) %in% c("calculalo", ""), NA, as.numeric(input$periodos)))
+  pago <- if (input$tipo_operacion == "Deuda") {
+    suppressWarnings(ifelse(tolower(input$pago) %in% c("calculalo", ""), NA, as.numeric(input$pago)))
+  } else {
+    NA  # Para fondos de amortización, el pago siempre se calcula
+  }
+  
+  # Leer enganche para deuda
+  enganche <- if (!is.null(input$tiene_enganche) && input$tiene_enganche && input$tipo_operacion == "Deuda") {
+    input$monto_enganche
+  } else {
+    0
+  }
+  
+  # Calcular tasa por periodo
+  tasa_periodo <- NA
+  if (!is.na(tasa)) {
+    if (!is.null(input$tipo_tasa) && input$tipo_tasa == "Nominal convertible") {
+      frecuencia <- as.numeric(input$frecuencia_conversion)
+      tasa_periodo <- tasa / frecuencia
+    } else if (!is.null(input$tipo_tasa) && input$tipo_tasa == "Efectiva") {
+      if (tasa < 1.5) {
+        tasa_periodo <- tasa
+      } else {
+        tasa_periodo <- (1 + tasa)^(1 / UNIDAD_TASA_MAP[input$unidad_tasa]) - 1
+      }
+    }
+  }
+  
+  # Retornar lista de valores
+  list(
+    capital = capital,
+    tasa = tasa,
+    tasa_periodo = tasa_periodo,
+    n_periodos = if (!is.na(n)) n else NA,
+    pago = pago,
+    tipo_operacion = input$tipo_operacion,
+    tipo_anualidad = input$Tipo_anualidad,
+    diferido = if (!is.null(input$Tipo_anualidad) && input$Tipo_anualidad == "Diferida") as.numeric(input$diferido) else 0,
+    enganche = enganche
+  )
+}
+
+# Función para validar inputs
+validar_inputs <- function(valores) {
+  datos_faltantes <- sum(is.na(c(
+    valores$capital, 
+    valores$tasa_periodo, 
+    valores$n_periodos, 
+    valores$pago
+  )))
+  return(datos_faltantes == 1)
+}
+
+# Funciones para la tasa
+calcular_tasa_periodo <- function(tasa, tipo_tasa, frecuencia_conversion = NULL, unidad_tasa = NULL) {
+  if (tipo_tasa == "Nominal convertible") {
+    return(tasa / as.numeric(frecuencia_conversion))
+  } else {
+    if (tasa < 1.5) {
+      return(tasa)
+    }
+    return((1 + tasa)^(1 / UNIDAD_TASA_MAP[unidad_tasa]) - 1)
+  }
+}
+#anualidades vencidas, anticipadas y diferidas
+calcular_pago_deuda <- function(capital, tasa_periodo, n_periodos, tipo_anualidad, k = 0) {
+  base <- capital * (tasa_periodo * (1 + tasa_periodo)^n_periodos) / ((1 + tasa_periodo)^n_periodos - 1)
+  switch(tipo_anualidad,
+         "Vencida" = base,
+         "Anticipada" = base / (1 + tasa_periodo),
+         "Diferida" = base * (1 + tasa_periodo)^k)
+}
+
+calcular_capital_deuda <- function(pago, tasa_periodo, n_periodos, tipo_anualidad, k = 0) {
+  base <- pago * ((1 + tasa_periodo)^n_periodos - 1) / (tasa_periodo * (1 + tasa_periodo)^n_periodos)
+  switch(tipo_anualidad,
+         "Vencida" = base,
+         "Anticipada" = base * (1 + tasa_periodo),
+         "Diferida" = base / (1 + tasa_periodo)^k)
+}
+
+# Función para calcular tabla con amortización por porcentajes
+calcular_tabla_deuda_porcentajes <- function(valores, input) {
+  # Extraer valores básicos
+  capital_original <- valores$capital
+  capital <- capital_original - valores$enganche
+  tasa_periodo <- valores$tasa_periodo
+  
+  # Procesar porcentajes
+  porcentajes <- as.numeric(unlist(strsplit(input$porcentajes_lista, ","))) / 100
+  if (abs(sum(porcentajes) - 1) > 0.0001) {
+    return(data.frame(Error = "Los porcentajes deben sumar 100%"))
+  }
+  
+  # Calcular montos de amortización por periodo
+  amortizaciones <- capital * porcentajes
+  n_pagos <- length(porcentajes)
+  
+  # Generar tabla
+  tabla <- data.frame(
+    Periodo = 0:n_pagos,
+    Pago = NA,
+    Interés = NA,
+    Amortización = NA,
+    Saldo = NA
+  )
+  
+  # Establecer valores iniciales considerando el enganche
+  saldo <- capital_original
+  tabla[1, ] <- c(0, valores$enganche, 0, valores$enganche, round(capital, 2))
+  
+  # Calcular valores para cada periodo
+  for (t in 1:n_pagos) {
+    interes <- saldo * tasa_periodo
+    amort <- amortizaciones[t]
+    pago <- amort + interes
+    saldo <- saldo - amort
+    
+    tabla[t + 1, ] <- c(t, round(pago, 2), round(interes, 2), round(amort, 2), round(saldo, 2))
+  }
+  
+  # Agregar atributos con resultados
+  attr(tabla, "resultado") <- list(
+    capital = capital_original,
+    capital_financiado = capital,
+    enganche = valores$enganche,
+    tasa = tasa_periodo * 100,
+    n = n_pagos,
+    pago = paste(round(tabla$Pago[-1], 2), collapse = ", "),
+    porcentajes = paste(porcentajes * 100, "%", collapse = ", ")
+  )
+  
+  return(tabla)
+}
+
+calcular_tabla_deuda <- function(valores, input) {
+  if (!is.null(input$usar_porcentajes) && input$usar_porcentajes) {
+    return(calcular_tabla_deuda_porcentajes(valores, input))
+  } else if (!is.null(input$pagos_personalizados) && input$pagos_personalizados) {
+    return(calcular_tabla_deuda_personalizada(valores, input))
+  }
+  
+  # Extraer valores
+  capital_original <- valores$capital
+  capital <- capital_original - valores$enganche  # Ajustar capital por enganche
+  tasa_periodo <- valores$tasa_periodo
+  n_periodos <- valores$n_periodos
+  pago <- valores$pago
+  k <- valores$diferido
+  
+  # Calcular variable faltante
+  if (is.na(pago)) {
+    pago <- calcular_pago_deuda(capital, tasa_periodo, n_periodos, valores$tipo_anualidad, k)
+  } else if (is.na(capital)) {
+    capital <- calcular_capital_deuda(pago, tasa_periodo, n_periodos, valores$tipo_anualidad, k)
+    capital_original <- capital + valores$enganche
+  } else if (is.na(tasa_periodo)) {
+    tasa_periodo <- calcular_tasa_deuda(capital, pago, n_periodos, valores$tipo_anualidad, k)
+  } else if (is.na(n_periodos)) {
+    n_periodos <- calcular_periodos_deuda(capital, pago, tasa_periodo, valores$tipo_anualidad, k)
+  }
+  
+  # Generar tabla de amortización
+  total_periodos <- n_periodos + k
+  tabla <- data.frame(
+    Periodo = 0:total_periodos,
+    Pago = NA,
+    Interés = NA,
+    Amortización = NA,
+    Saldo = NA
+  )
+  
+  # Establecer valores iniciales considerando el enganche
+  saldo <- capital_original
+  tabla[1, ] <- c(0, valores$enganche, 0, valores$enganche, round(capital, 2))
+  
+  # Calcular valores para cada periodo
+  for (t in 1:total_periodos) {
+    if (t <= k) {
+      # Periodo de diferimiento
+      interes <- saldo * tasa_periodo
+      saldo <- saldo + interes
+      tabla[t + 1, ] <- c(t, 0, round(interes, 2), 0, round(saldo, 2))
+    } else {
+      # Periodo normal
+      interes <- saldo * tasa_periodo
+      amort <- pago - interes
+      saldo <- saldo - amort
+      tabla[t + 1, ] <- c(t, round(pago, 2), round(interes, 2), round(amort, 2), round(saldo, 2))
+    }
+  }
+  
+  # Agregar atributos con resultados
+  attr(tabla, "resultado") <- list(
+    capital = capital_original,
+    capital_financiado = capital,
+    enganche = valores$enganche,
+    tasa = tasa_periodo * 100,
+    n = n_periodos,
+    pago = pago
+  )
+  
+  return(tabla)
+}
+
+calcular_tabla_ahorro <- function(valores, input) {
+  # Extraer valores básicos
+  capital <- valores$capital  # Objetivo a acumular
+  tasa_periodo <- valores$tasa_periodo
+  n_periodos <- valores$n_periodos
+  k <- if (!is.null(input$Tipo_anualidad) && input$Tipo_anualidad == "Diferida") valores$diferido else 0
+  
+  # Calcular el pago necesario según el tipo de anualidad
+  if (is.na(pago)) {
+    pago <- switch(input$Tipo_anualidad,
+      "Vencida" = capital * tasa_periodo / ((1 + tasa_periodo)^n_periodos - 1),
+      "Anticipada" = capital * tasa_periodo / ((1 + tasa_periodo)^n_periodos - 1) / (1 + tasa_periodo),
+      "Diferida" = capital * tasa_periodo / ((1 + tasa_periodo)^n_periodos - 1) * (1 + tasa_periodo)^k
+    )
+  }
+  
+  # Generar tabla
+  total_periodos <- n_periodos + k
+  tabla <- data.frame(
+    Periodo = 0:total_periodos,
+    Depósito = NA,
+    Interés = NA,
+    Fondo_Acumulado = NA
+  )
+  
+  # Establecer valores iniciales
+  saldo <- 0
+  tabla[1, ] <- c(0, 0, 0, round(saldo, 2))
+  
+  # Calcular valores para cada periodo
+  for (t in 1:total_periodos) {
+    if (t <= k) {
+      # Periodo de diferimiento
+      interes <- saldo * tasa_periodo
+      saldo <- saldo + interes
+      tabla[t + 1, ] <- c(t, 0, round(interes, 2), round(saldo, 2))
+    } else {
+      # Periodo normal
+      if (input$Tipo_anualidad == "Anticipada") {
+        saldo <- saldo + pago
+        interes <- saldo * tasa_periodo
+        saldo <- saldo + interes
+      } else {
+        interes <- saldo * tasa_periodo
+        saldo <- saldo + interes + pago
+      }
+      tabla[t + 1, ] <- c(t, round(pago, 2), round(interes, 2), round(saldo, 2))
+    }
+  }
+  
+  # Agregar atributos con resultados
+  attr(tabla, "resultado") <- list(
+    objetivo = capital,
+    tasa = tasa_periodo * 100,
+    n = n_periodos,
+    pago = pago,
+    tipo_anualidad = input$Tipo_anualidad,
+    periodos_diferidos = k
+  )
+  
+  return(tabla)
+}
+
+# Funciones para mostrar resultados
+mostrar_resultado_tir <- function(input) {
+  flujos <- as.numeric(unlist(strsplit(input$flujos, ",")))
+  tir <- uniroot(function(r) sum(flujos / (1 + r)^(0:(length(flujos) - 1))), c(-0.99, 1))$root
+  cat("La TIR es aproximadamente:", round(tir * 100, 2), "%")
+}
+
+mostrar_resultado_amortizacion <- function(input, datos_tabla) {
+  if (is.null(datos_tabla) || "Error" %in% colnames(datos_tabla)) return(NULL)
+  resumen <- attr(datos_tabla, "resultado")
+  
+  cat("Resumen de la operación:\n")
+  
+  if (input$tipo_operacion == "Ahorro") {
+    cat("=== FONDO DE AMORTIZACIÓN ===\n")
+    cat("Objetivo a acumular: $", format(resumen$objetivo, big.mark = ","), "\n")
+    cat("Depósito periódico necesario: $", format(round(resumen$pago, 2), big.mark = ","), "\n")
+    cat("Tasa por periodo:", round(resumen$tasa, 4), "%\n")
+    cat("Número de periodos:", resumen$n, "\n")
+    cat("Tipo de anualidad:", resumen$tipo_anualidad, "\n")
+    if (resumen$tipo_anualidad == "Diferida") {
+      cat("Periodos de diferimiento:", resumen$periodos_diferidos, "\n")
+    }
+    cat("\nNota: La tabla muestra la evolución del fondo periodo a periodo\n")
+  } else {
+    if (!is.null(resumen$capital) && is.numeric(resumen$capital)) {
+      cat("Monto total:", round(resumen$capital, 2), "\n")
+      
+      if (!is.null(resumen$enganche) && resumen$enganche > 0) {
+        cat("Enganche:", round(resumen$enganche, 2), "\n")
+        cat("Monto financiado:", round(resumen$capital_financiado, 2), "\n")
+      }
+    }
+    if (!is.null(resumen$n) && is.numeric(resumen$n)) {
+      cat("Número de periodos:", round(resumen$n, 2), "\n")
+    }
+    if (!is.null(resumen$pago)) {
+      if (is.numeric(resumen$pago)) {
+        cat("Pago periódico:", round(resumen$pago, 2), "\n")
+      } else {
+        cat("Pagos personalizados:", resumen$pago, "\n")
+      }
+    }
+    
+    if (!is.null(input$ver_saldo_especifico) && input$ver_saldo_especifico) {
+      periodo <- input$periodo_consulta
+      if (periodo <= nrow(datos_tabla) - 1 && "Saldo" %in% colnames(datos_tabla)) {
+        saldo_periodo <- datos_tabla[periodo + 1, "Saldo"]
+        cat("\nSaldo insoluto al final del periodo", periodo, ":", round(saldo_periodo, 2))
+      }
+    }
+    
+    if (!is.null(input$ver_proporcion_amortizada) && input$ver_proporcion_amortizada) {
+      periodo <- input$periodo_amortizado
+      if (periodo <= nrow(datos_tabla) - 1 && "Amortización" %in% colnames(datos_tabla)) {
+        amort_acum <- sum(datos_tabla[2:(periodo + 1), "Amortización"])
+        proporcion <- amort_acum / resumen$capital
+        cat("\nProporción del saldo amortizado al periodo", periodo, ":", round(proporcion * 100, 2), "%")
+        cat("\nMonto amortizado: $", round(amort_acum, 2))
+      }
+    }
+  }
+}
+
+# Funciones auxiliares para cálculos de tasas y periodos
+calcular_tasa_deuda <- function(capital, pago, n_periodos, tipo_anualidad, k = 0) {
+  f <- switch(tipo_anualidad,
+    "Vencida" = function(i) capital * (i * (1 + i)^n_periodos) / ((1 + i)^n_periodos - 1) - pago,
+    "Anticipada" = function(i) capital * (i * (1 + i)^n_periodos) / ((1 + i)^n_periodos - 1) / (1 + i) - pago,
+    "Diferida" = function(i) capital * (i * (1 + i)^n_periodos) / ((1 + i)^n_periodos - 1) * (1 + i)^k - pago
+  )
+  uniroot(f, c(0.000001, 1))$root
+}
+
+calcular_periodos_deuda <- function(capital, pago, tasa_periodo, tipo_anualidad, k = 0) {
+  f <- switch(tipo_anualidad,
+    "Vencida" = function(n) capital * (tasa_periodo * (1 + tasa_periodo)^n) / ((1 + tasa_periodo)^n - 1) - pago,
+    "Anticipada" = function(n) capital * (tasa_periodo * (1 + tasa_periodo)^n) / ((1 + tasa_periodo)^n - 1) / (1 + tasa_periodo) - pago,
+    "Diferida" = function(n) capital * (tasa_periodo * (1 + tasa_periodo)^n) / ((1 + tasa_periodo)^n - 1) * (1 + tasa_periodo)^k - pago
+  )
+  n_decimal <- uniroot(f, c(1, 600))$root
+  floor(n_decimal)
+}
+
+# Función para manejar pagos personalizados
+calcular_tabla_deuda_personalizada <- function(valores, input) {
+  # Extraer valores
+  capital <- valores$capital
+  tasa_periodo <- valores$tasa_periodo
+  
+  # Leer lista de pagos ingresados manualmente
+  pagos_vec <- as.numeric(unlist(strsplit(input$pagos_lista, ",")))
+  
+  # Procesar tasas variables si están activadas
+  tasas_variables <- if(isTRUE(input$tasas_variables)) {
+    tasas_base <- as.numeric(unlist(strsplit(input$tasas_lista, ","))) / 100
+    
+    if(input$tipo_tasas_variables == "Nominal convertible") {
+      # Convertir tasas nominales a tasas por periodo
+      tasas_base / as.numeric(input$frecuencia_conversion_var)
+    } else {
+      # Convertir tasas efectivas al periodo correspondiente
+      (1 + tasas_base)^(1 / UNIDAD_TASA_MAP[input$unidad_tasa_var]) - 1
+    }
+  } else {
+    rep(tasa_periodo, input$periodos_totales)
+  }
+  
+  # Inicializar tabla
+  n_personalizado <- input$periodos_totales
+  tabla <- data.frame(
+    Periodo = 0:n_personalizado,
+    Pago = NA,
+    Interés = NA,
+    Amortización = NA,
+    Saldo = NA,
+    "Tasa %" = NA
+  )
+  
+  # Establecer valores iniciales
+  saldo <- capital
+  tabla[1, ] <- c(0, 0, 0, 0, round(saldo, 2), round(tasas_variables[1] * 100, 2))
+  
+  # Procesar pagos conocidos
+  for (t in 1:(length(pagos_vec))) {
+    pago_t <- pagos_vec[t]
+    tasa_actual <- tasas_variables[t]
+    interes <- saldo * tasa_actual
+    amort <- pago_t - interes
+    saldo <- saldo - amort
+    
+    tabla[t + 1, ] <- c(
+      t,
+      round(pago_t, 2),
+      round(interes, 2),
+      round(amort, 2),
+      round(saldo, 2),
+      round(tasa_actual * 100, 2)
+    )
+  }
+  
+  # Si queda un período final, calcular el último pago
+  if (length(pagos_vec) < n_personalizado) {
+    t <- length(pagos_vec) + 1
+    tasa_actual <- tasas_variables[t]
+    interes <- saldo * tasa_actual
+    pago_final <- saldo + interes
+    amort <- saldo
+    saldo <- 0
+    
+    tabla[t + 1, ] <- c(
+      t,
+      round(pago_final, 2),
+      round(interes, 2),
+      round(amort, 2),
+      round(saldo, 2),
+      round(tasa_actual * 100, 2)
+    )
+  }
+  
+  # Agregar atributos con resultados
+  attr(tabla, "resultado") <- list(
+    capital = capital,
+    tasa = tasa_periodo * 100,
+    n = n_personalizado,
+    pago = paste(c(pagos_vec, if(length(pagos_vec) < n_personalizado) round(pago_final,2)), collapse = ", ")
+  )
+  
+  return(tabla)
+}
+
+# Función para calcular el pago del fondo de amortización
+calcular_pago_fondo <- function(capital, tasa_periodo, n_periodos, tipo_anualidad, k = 0) {
+  base <- capital * tasa_periodo / ((1 + tasa_periodo)^n_periodos - 1)
+  switch(tipo_anualidad,
+         "Vencida" = base,
+         "Anticipada" = base / (1 + tasa_periodo),
+         "Diferida" = base * (1 + tasa_periodo)^k,
+         base)  # default case
+}
+
+# Función para calcular tabla de fondo de amortización
+calcular_tabla_fondo <- function(valores, input) {
+  # Extraer valores básicos
+  capital <- valores$capital  # Objetivo a acumular
+  tasa_periodo <- valores$tasa_periodo
+  n_periodos <- valores$n_periodos
+  k <- valores$diferido
+  
+  # Calcular el pago necesario según el tipo de anualidad
+  pago <- switch(valores$tipo_anualidad,
+    "Vencida" = capital * tasa_periodo / ((1 + tasa_periodo)^n_periodos - 1),
+    "Anticipada" = (capital * tasa_periodo / ((1 + tasa_periodo)^n_periodos - 1)) / (1 + tasa_periodo),
+    "Diferida" = (capital * tasa_periodo / ((1 + tasa_periodo)^n_periodos - 1)) * (1 + tasa_periodo)^k
+  )
+  
+  # Generar tabla
+  total_periodos <- n_periodos + k
+  tabla <- data.frame(
+    Periodo = 0:total_periodos,
+    Depósito = NA,
+    Interés = NA,
+    Fondo_Acumulado = NA
+  )
+  
+  # Establecer valores iniciales
+  saldo <- 0
+  tabla[1, ] <- c(0, 0, 0, round(saldo, 2))
+  
+  # Calcular valores para cada periodo
+  for (t in 1:total_periodos) {
+    if (t <= k) {
+      # Periodo de diferimiento
+      interes <- saldo * tasa_periodo
+      saldo <- saldo + interes
+      tabla[t + 1, ] <- c(t, 0, round(interes, 2), round(saldo, 2))
+    } else {
+      # Periodo normal
+      if (valores$tipo_anualidad == "Anticipada") {
+        # Para anualidad anticipada, primero se hace el depósito
+        saldo <- saldo + pago
+        interes <- saldo * tasa_periodo
+        saldo <- saldo + interes
+      } else {
+        # Para anualidad vencida, primero se calcula el interés
+        interes <- saldo * tasa_periodo
+        saldo <- saldo + interes + pago
+      }
+      tabla[t + 1, ] <- c(t, round(pago, 2), round(interes, 2), round(saldo, 2))
+    }
+  }
+  
+  # Agregar atributos con resultados
+  attr(tabla, "resultado") <- list(
+    objetivo = capital,
+    tasa = tasa_periodo * 100,
+    n = n_periodos,
+    pago = pago,
+    tipo_anualidad = valores$tipo_anualidad,
+    periodos_diferidos = k
+  )
+  
+  return(tabla)
+}
+
 #interfaz----
 ui <- fluidPage(
   titlePanel("Sistema de Matemáticas Financieras"),
+  
+  # CSS personalizado para mensajes
+  tags$head(
+    tags$style(HTML("
+      .error-message { 
+        color: #d9534f; 
+        background-color: #f2dede; 
+        border: 1px solid #ebccd1;
+        border-radius: 4px;
+        padding: 15px;
+        margin-bottom: 20px;
+      }
+      .info-message {
+        color: #31708f;
+        background-color: #d9edf7;
+        border: 1px solid #bce8f1;
+        border-radius: 4px;
+        padding: 15px;
+        margin-bottom: 20px;
+      }
+      .help-text {
+        font-size: 0.9em;
+        color: #666;
+        font-style: italic;
+      }
+    "))
+  ),
+  
   sidebarLayout(
     sidebarPanel(
       selectInput("tema", "Selecciona un tema:",
                   choices = c("Tablas de Amortización / Ahorro", "Depreciación", "TIR", "Bonos (opcional)")),
+      
       conditionalPanel(
         condition = "input.tema == 'Tablas de Amortización / Ahorro'",
-        selectInput("tipo_operacion", "Tipo de operación:", choices = c("Deuda", "Ahorro")),
+        selectInput("tipo_operacion", "Tipo de operación:", 
+                   choices = c("Deuda" = "Deuda", "Fondo de Amortización" = "Ahorro")),
+        
+        # Panel para Deuda
         conditionalPanel(
           condition = "input.tipo_operacion == 'Deuda'",
-          checkboxInput("tasas_variables", "¿Usar tasas variables por periodo?", value = FALSE),
+          div(class = "info-message",
+              "Calcula pagos, intereses y saldos de una deuda. Puedes dejar UN campo como 'Calculalo'."
+          ),
+          
+          textInput("capital", "Monto del préstamo:", value = "10000"),
+          checkboxInput("tiene_enganche", "¿Tiene enganche?", FALSE),
+          conditionalPanel(
+            condition = "input.tiene_enganche == true",
+            numericInput("monto_enganche", "Monto del enganche:", value = 0, min = 0)
+          ),
+          
+          radioButtons("tipo_pago", "Tipo de pago:",
+                      choices = c(
+                        "Regular" = "regular",
+                        "Porcentajes de amortización" = "porcentajes",
+                        "Pagos personalizados" = "personalizados"
+                      )),
           
           conditionalPanel(
-            condition = "input.tasas_variables == true",
-            radioButtons("tipo_tasas_variables", "Tipo de tasas variables:",
-                        choices = c("Nominal convertible", "Efectiva"),
-                        selected = "Nominal convertible"),
-            textInput("tasas_lista", "Tasas por periodo (%) separadas por comas:", "12,11,10,9"),
-            helpText("Ingresa las tasas anuales. Por ejemplo: 12,11,10,9 para tasas decrecientes"),
-            
-            conditionalPanel(
-              condition = "input.tipo_tasas_variables == 'Nominal convertible'",
-              selectInput("frecuencia_conversion_var", "Frecuencia de conversión de las tasas nominales:",
-                        choices = c("Anual" = 1, "Semestral" = 2, "Trimestral" = 4, "Bimestral"= 6, "Mensual" = 12), 
-                        selected = 12)
-            ),
-            
-            conditionalPanel(
-              condition = "input.tipo_tasas_variables == 'Efectiva'",
-              selectInput("unidad_tasa_var",
-                        "Unidad de periodo de las tasas efectivas:",
-                        choices = c("Anual", "Mensual", "Quincenal", "Diaria"))
-              ),
-            
-            numericInput("num_periodos_tasas", "Número de periodos con tasas variables:", value = 4, min = 1)
+            condition = "input.tipo_pago == 'porcentajes'",
+            textInput("porcentajes_lista", "Porcentajes (deben sumar 100%):", "50,30,20"),
+            div(class = "help-text", "Ejemplo: 50,30,20 para tres pagos que amortizan 50%, 30% y 20% del capital")
           ),
           
           conditionalPanel(
-            condition = "!input.tasas_variables",
-            radioButtons("tipo_tasa", "Tipo de tasa:",
-                        choices = c("Nominal convertible", "Efectiva"),
-                        selected = "Nominal convertible"),
-            
-            conditionalPanel(
-              condition = "input.tipo_tasa == 'Nominal convertible'",
-              textInput("tasa", "Tasa nominal anual (%) (puedes poner 'Calculalo'):", value = "10"),
-              selectInput("frecuencia_conversion", "Frecuencia de conversión de la tasa nominal:",
-                        choices = c("Anual" = 1, "Semestral" = 2, "Trimestral" = 4, "Bimestral"= 6, "Mensual" = 12), 
-                        selected = 2)
-            ),
-            
-            conditionalPanel(
-              condition = "input.tipo_tasa == 'Efectiva'",
-              textInput("tasa", "Tasa efectiva por periodo (%):", value = "10"),
-              selectInput("unidad_tasa",
-                        "Unidad de periodo de la tasa efectiva:",
-                        choices = c("Anual", "Mensual", "Quincenal", "Diaria"))
-            )
-          ),
-          radioButtons("Tipo_anualidad", "Tipo de Anualidad:",choices = c("Vencida", "Anticipada", "Diferida")),
-          conditionalPanel(
-            condition="input.Tipo_anualidad ==  'Diferida'",
-            numericInput("diferido", "periodos de diferimientos:", value=1, min=1)
-          ),
-          textInput("capital", "Monto presente o futuro (puede ser 'Calculalo'):", value = "10000"),
-          textInput("periodos", "Número de periodos (puede ser 'Calculalo'):", value = "5"),
-          conditionalPanel(
-            condition = "!input.pagos_personalizados",
-            selectInput("unidad_periodo", "Unidad de los periodos:",
-                        choices = c("Años","Semestres","Bimestrales", "Meses", "Quincenas", "Días"))
-          ),
-          conditionalPanel(
-            condition = "!input.pagos_personalizados",
-            textInput("pago", "Pago por periodo (puede ser 'Calculalo'):", value = "Calculalo")
-          ),
-          checkboxInput("pagos_personalizados", "¿Usar pagos personalizados?", value = FALSE),
-          
-          conditionalPanel(
-            condition = "input.pagos_personalizados == true",
-            textInput("pagos_lista", "Pagos personalizados (separa por comas):", "30000,30000,30000"),
-            numericInput("valor_final", "Pago final para saldar la deuda:", value = 10000),
-            numericInput("periodos_totales", "Total de periodos:", value = 4)
-          ),
-          checkboxInput("ver_saldo_especifico", "¿Ver saldo insoluto en un periodo específico?", value = FALSE),
-          
-          conditionalPanel(
-            condition = "input.ver_saldo_especifico",
-            numericInput("periodo_consulta", "Periodo a consultar (por ejemplo, 120):", value = 120, min = 1)
-          ),
-          #fincaliz
-          checkboxInput("ver_proporcion_amortizada", "¿Ver proporción amortizada en un periodo específico?", value = FALSE),
-          
-          conditionalPanel(
-            condition = "input.ver_proporcion_amortizada",
-            numericInput("periodo_amortizado", "Periodo a consultar (por ejemplo, 12):", value = 12, min = 1)
+            condition = "input.tipo_pago == 'personalizados'",
+            textInput("pagos_lista", "Lista de pagos:", "30000,30000,30000"),
+            div(class = "help-text", "Ingresa los pagos separados por comas")
           ),
           
-          
-          
           conditionalPanel(
-            condition = "input.tema == 'TIR'",
-            textInput("flujos", "Flujos de efectivo separados por coma (ej. -1000,200,300,400):", value = "-1000,300,400,500")
-          ),
-          conditionalPanel(
-            condition = "input.tema == 'Bonos (opcional)'",
-            numericInput("valor_nominal", "Valor nominal del bono:", value = 1000),
-            numericInput("cupon", "Tasa de cupón (%):", value = 5),
-            numericInput("rendimiento", "Rendimiento exigido (%):", value = 4),
-            numericInput("años_bono", "Años al vencimiento:", value = 5)
+            condition = "input.tipo_pago == 'regular'",
+            textInput("pago", "Pago periódico:", value = "Calculalo")
           )
-        ),   
-        #caliz
+        ),
+        
+        # Panel para Fondo de Amortización
         conditionalPanel(
           condition = "input.tipo_operacion == 'Ahorro'",
-          textInput("tipo_anualidad", "Tipo de anualidad:", value = "Vencida")
+          div(class = "info-message",
+              "Calcula el depósito periódico necesario para acumular un objetivo"
+          ),
+          numericInput("capital", "Monto objetivo:", value = 100000, min = 0),
+          numericInput("periodos", "Número de periodos:", value = 12, min = 1)
         ),
-      ),
+        
+        # Campos comunes para ambos tipos
+        radioButtons("Tipo_anualidad", "Tipo de Anualidad:",
+                    choices = c("Vencida", "Anticipada", "Diferida")),
+        
+        conditionalPanel(
+          condition = "input.Tipo_anualidad == 'Diferida'",
+          numericInput("diferido", "Periodos de diferimiento:", value = 1, min = 1)
+        ),
+        
+        radioButtons("tipo_tasa", "Tipo de tasa:",
+                    choices = c("Nominal convertible", "Efectiva")),
+        
+        conditionalPanel(
+          condition = "input.tipo_tasa == 'Nominal convertible'",
+          textInput("tasa", "Tasa nominal anual (%):", value = "10"),
+          selectInput("frecuencia_conversion", "Frecuencia de conversión:",
+                     choices = c("Anual" = 1, "Semestral" = 2, "Trimestral" = 4, 
+                               "Bimestral" = 6, "Mensual" = 12),
+                     selected = 12)
+        ),
+        
+        conditionalPanel(
+          condition = "input.tipo_tasa == 'Efectiva'",
+          textInput("tasa", "Tasa efectiva (%):", value = "10"),
+          selectInput("unidad_tasa", "Unidad de periodo:",
+                     choices = c("Anual", "Mensual", "Quincenal", "Diaria"))
+        ),
+        
+        selectInput("unidad_periodo", "Unidad de los periodos:",
+                    choices = c("Años", "Semestres", "Bimestrales", "Meses", "Quincenas", "Días"))
+      )
     ),
     mainPanel(
       h3("Resultado"),
+      # Panel de mensajes de error/información
+      uiOutput("mensajes"),
+      # Resultados
       DTOutput("tabla"),
       plotOutput("grafica"),
       verbatimTextOutput("resultado")
@@ -130,267 +659,32 @@ ui <- fluidPage(
   )
 )
 #la lógica del servidor
-server <- function(input, output) {
+server <- function(input, output, session) {
+  # Función reactiva principal para cálculos
   datos <- reactive({
+    req(input$tema)
+    
     if (input$tema == "Tablas de Amortización / Ahorro") {
-      unidad_tasa_map <- c(Anual = 1, Bimestral= 6, Mensual = 12, Quincenal = 24, Diaria = 360)
-      unidad_periodo_map <- c(Años = 1, Semestres = 2, Bimestrales = 6, Meses = 12, Quincenas = 24, Días = 360)
-      # Leer inputs
-      capital <- suppressWarnings(ifelse(tolower(input$capital) %in% c("calculalo", ""), NA, as.numeric(input$capital)))
-      tasa    <- suppressWarnings(ifelse(tolower(input$tasa)    %in% c("calculalo", ""), NA, as.numeric(input$tasa))) / 100
-      n       <- suppressWarnings(ifelse(tolower(input$periodos)%in% c("calculalo", ""), NA, as.numeric(input$periodos)))
-      pago    <- suppressWarnings(ifelse(tolower(input$pago)    %in% c("calculalo", ""), NA, as.numeric(input$pago)))
+      valores <- obtener_valores_entrada(input)
       
-      # Inicializa
-      tasa_periodo <- NA
-      n_periodos   <- if (!is.na(n)) n else NA
-      
-      # Solo calculas si tasa fue proporcionada
-      if (!is.na(tasa)) {
-        if (input$tipo_tasa == "Nominal convertible") {
-          frecuencia   <- as.numeric(input$frecuencia_conversion)
-          tasa_periodo <- tasa / frecuencia
-        } else if (input$tipo_tasa == "Efectiva") {
-          if (tasa < 1.5) {
-            tasa_periodo <- tasa
-          } else {
-            tasa_periodo <- (1 + tasa)^(1 / unidad_tasa_map[input$unidad_tasa]) - 1
-          }
+      if (input$tipo_operacion == "Deuda") {
+        # Para deudas, validar que solo un campo sea "Calculalo"
+        if (!validar_inputs(valores)) {
+          return(data.frame(Error = "Debes dejar solo un campo como 'Calculalo'"))
         }
-      }
-      
-      n_periodos <- if (!is.na(n)) n else NA
-      #SOLO PUEDE HABER UN DATO FALTANTE
-      datos_faltantes <- sum(is.na(c(capital, tasa_periodo, n_periodos, pago)))
-      if (datos_faltantes != 1) {
-        return(data.frame(Error = "Debes dejar solo un campo como 'Calculalo'"))
-      }
-      tipo <- input$tipo_operacion
-      tabla <- NULL
-      ## 🔹 BLOQUE PARA PAGOS PERSONALIZADOS
-      if (tipo == "Deuda" && isTRUE(input$pagos_personalizados)) {
-        # Leer lista de pagos ingresados manualmente
-        pagos_vec <- as.numeric(unlist(strsplit(input$pagos_lista, ",")))
         
-        # Procesar tasas variables si están activadas
-        tasas_variables <- if(isTRUE(input$tasas_variables)) {
-          tasas_base <- as.numeric(unlist(strsplit(input$tasas_lista, ","))) / 100
-          
-          if(input$tipo_tasas_variables == "Nominal convertible") {
-            # Convertir tasas nominales a tasas por periodo
-            tasas_base / as.numeric(input$frecuencia_conversion_var)
-          } else {
-            # Convertir tasas efectivas al periodo correspondiente
-            (1 + tasas_base)^(1 / unidad_tasa_map[input$unidad_tasa_var]) - 1
-          }
+        if (isTRUE(input$pagos_personalizados)) {
+          return(calcular_tabla_deuda_personalizada(valores, input))
+        } else if (isTRUE(input$usar_porcentajes)) {
+          return(calcular_tabla_deuda_porcentajes(valores, input))
         } else {
-          rep(tasa_periodo, input$periodos_totales)
+          return(calcular_tabla_deuda(valores, input))
         }
-        
-        # Inicializar tabla
-        n_personalizado <- input$periodos_totales
-        tabla <- data.frame(Periodo = 0:n_personalizado, 
-                          Pago = NA, 
-                          Interés = NA, 
-                          Amortización = NA, 
-                          Saldo = NA,
-                          "Tasa %" = NA)
-        
-        # Establecer valores iniciales
-        saldo <- capital
-        tabla[1, ] <- c(0, 0, 0, 0, round(saldo, 2), round(tasas_variables[1] * 100, 2))
-        
-        # Procesar pagos conocidos
-        for (t in 1:(length(pagos_vec))) {
-          pago_t <- pagos_vec[t]
-          tasa_actual <- tasas_variables[t]
-          interes <- saldo * tasa_actual
-          amort <- pago_t - interes
-          saldo <- saldo - amort
-          
-          tabla[t + 1, ] <- c(t, 
-                             round(pago_t, 2), 
-                             round(interes, 2), 
-                             round(amort, 2), 
-                             round(saldo, 2),
-                             round(tasa_actual * 100, 2))
-        }
-        
-        # Si queda un período final, calcular el último pago
-        if (length(pagos_vec) < n_personalizado) {
-          t <- length(pagos_vec) + 1
-          tasa_actual <- tasas_variables[t]
-          interes <- saldo * tasa_actual
-          pago_final <- saldo + interes
-          amort <- saldo
-          saldo <- 0
-          
-          tabla[t + 1, ] <- c(t, 
-                             round(pago_final, 2), 
-                             round(interes, 2), 
-                             round(amort, 2), 
-                             round(saldo, 2),
-                             round(tasa_actual * 100, 2))
-        }
-        
-        attr(tabla, "resultado") <- list(
-          capital = capital,
-          tasa = tasa_periodo * 100,
-          n = n_personalizado,
-          pago = paste(c(pagos_vec, if(length(pagos_vec) < n_personalizado) round(pago_final,2)), collapse = ", ")
-        )
-        
-        return(tabla)
+      } else {
+        # Para fondos de amortización, no necesitamos validación de "Calculalo"
+        return(calcular_tabla_fondo(valores, input))
       }
-      
-      # 🔹 BLOQUE NORMAL PARA DEUDA (anualidades iguales)
-      # BLOQUE NORMAL DEUDA
-      if (tipo == "Deuda" && !isTRUE(input$pagos_personalizados)) {
-        k <- if (input$Tipo_anualidad == "Diferida") as.numeric(input$diferido) else 0
-        ultimo_periodo_incompleto <- FALSE
-        
-        # Cálculo de variable faltante
-        if (is.na(pago)) {
-          if (input$Tipo_anualidad == "Vencida") {
-            pago <- capital * (tasa_periodo * (1 + tasa_periodo)^n_periodos) / ((1 + tasa_periodo)^n_periodos - 1)
-          } else if (input$Tipo_anualidad == "Anticipada") {
-            pago <- capital * (tasa_periodo * (1 + tasa_periodo)^n_periodos) / ((1 + tasa_periodo)^n_periodos - 1) / (1 + tasa_periodo)
-          } else {
-            pago <- capital * (tasa_periodo * (1 + tasa_periodo)^n_periodos) / ((1 + tasa_periodo)^n_periodos - 1) * (1 + tasa_periodo)^k
-          }
-        } else if (is.na(capital)) {
-          if (input$Tipo_anualidad == "Vencida") {
-            capital <- pago * ((1 + tasa_periodo)^n_periodos - 1) / (tasa_periodo * (1 + tasa_periodo)^n_periodos)
-          } else if (input$Tipo_anualidad == "Anticipada") {
-            capital <- pago * ((1 + tasa_periodo)^n_periodos - 1) / (tasa_periodo * (1 + tasa_periodo)^n_periodos) * (1 + tasa_periodo)
-          } else {
-            capital <- pago * ((1 + tasa_periodo)^n_periodos - 1) / (tasa_periodo * (1 + tasa_periodo)^n_periodos) / (1 + tasa_periodo)^k
-          }
-        } else if (is.na(tasa_periodo)) {
-          if (input$Tipo_anualidad == "Vencida") {
-            f <- function(i) capital * (i * (1 + i)^n_periodos) / ((1 + i)^n_periodos - 1) - pago
-          } else if (input$Tipo_anualidad == "Anticipada") {
-            f <- function(i) capital * (i * (1 + i)^n_periodos) / ((1 + i)^n_periodos - 1) / (1 + i) - pago
-          } else {
-            f <- function(i) capital * (i * (1 + i)^n_periodos) / ((1 + i)^n_periodos - 1) * (1 + i)^k - pago
-          }
-          tasa_periodo <- uniroot(f, c(0.000001, 1))$root
-        } else if (is.na(n_periodos)) {
-          if (input$Tipo_anualidad == "Vencida") {
-            f <- function(n) capital * (tasa_periodo * (1 + tasa_periodo)^n) / ((1 + tasa_periodo)^n - 1) - pago
-          } else if (input$Tipo_anualidad == "Anticipada") {
-            f <- function(n) capital * (tasa_periodo * (1 + tasa_periodo)^n) / ((1 + tasa_periodo)^n - 1) / (1 + tasa_periodo) - pago
-          } else {
-            f <- function(n) capital * (tasa_periodo * (1 + tasa_periodo)^n) / ((1 + tasa_periodo)^n - 1) * (1 + tasa_periodo)^k - pago
-          }
-          n_decimal <- uniroot(f, c(1, 600))$root
-          n_periodos <- floor(n_decimal)
-          ultimo_periodo_incompleto <- TRUE
-        }
-        
-        # Generar tabla
-        saldo <- capital
-        total_periodos <- n_periodos + k  # Añadimos los periodos diferidos
-        tabla <- data.frame(Periodo = 0:total_periodos, Pago = NA, Interés = NA, Amortización = NA, Saldo = NA)
-        tabla[1, ] <- c(0, 0, 0, 0, round(saldo, 2))
-        
-        # Manejar periodos diferidos
-        for (t in 1:total_periodos) {
-          if (t <= k) {
-            # Durante el periodo de diferimiento, solo se acumula interés
-            interes <- saldo * tasa_periodo
-            saldo <- saldo + interes
-            tabla[t + 1, ] <- c(t, 0, round(interes, 2), 0, round(saldo, 2))
-          } else {
-            # Después del diferimiento, pagos normales
-            interes <- saldo * tasa_periodo
-            amort <- pago - interes
-            saldo <- saldo - amort
-            tabla[t + 1, ] <- c(t, round(pago, 2), round(interes, 2), round(amort, 2), round(saldo, 2))
-          }
-        }
-        
-        if (isTRUE(ultimo_periodo_incompleto) && saldo > 1e-2) {
-          interes <- saldo * tasa_periodo
-          pago_extra <- saldo + interes
-          saldo <- 0
-          tabla[nrow(tabla) + 1, ] <- c(n_periodos + k + 1, round(pago_extra, 2), round(interes, 2), round(pago_extra - interes, 2), 0)
-        }
-        
-        attr(tabla, "resultado") <- list(
-          capital = capital,
-          tasa = tasa_periodo * 100,
-          n = if (exists("n_decimal")) n_decimal else n_periodos,
-          pago = pago
-        )
-        
-        return(tabla)
-      }
-      
-      }
-      
-      else if (tipo == "Ahorro") {
-        tipo_anualidad <- input$Tipo_anualidad
-        k <- if (tipo_anualidad == "Diferida") as.numeric(input$diferido) else 0
-        ajuste <- if (tipo_anualidad == "Anticipada") 1 + tasa_periodo else 1
-        
-        ultimo_periodo_incompleto <- FALSE
-        
-        if (is.na(pago)) {
-          pago <- (capital * tasa_periodo) / (((1 + tasa_periodo)^(n_periodos + k) - 1) / tasa_periodo * ajuste)
-        } else if (is.na(capital)) {
-          capital <- pago * ((1 + tasa_periodo)^(n_periodos + k) - 1) / tasa_periodo * ajuste
-        } else if (is.na(tasa_periodo)) {
-          f <- function(i) pago * ((1 + i)^(n_periodos + k) - 1) / i * ajuste - capital
-          tasa_periodo <- uniroot(f, c(0.000001, 1))$root
-        } else if (is.na(n)) {
-          f <- function(n) pago * ((1 + tasa_periodo)^(n + k) - 1) / tasa_periodo * ajuste - capital
-          n_decimal <- uniroot(f, c(1, 600))$root
-          n_periodos <- floor(n_decimal)
-          ultimo_periodo_incompleto <- TRUE
-        }
-        
-        saldo <- 0
-        total_periodos <- n_periodos + k  # Añadimos los periodos diferidos
-        tabla <- data.frame(Periodo = 0:total_periodos, Pago = NA, Interés = NA, Aporte = NA, Saldo = NA)
-        tabla[1, ] <- c(0, 0, 0, 0, round(saldo, 2))
-        
-        # Manejar periodos diferidos
-        for (t in 1:total_periodos) {
-          if (t <= k) {
-            # Durante el periodo de diferimiento, solo se acumula interés
-            interes <- saldo * tasa_periodo
-            saldo <- saldo + interes
-            tabla[t + 1, ] <- c(t, 0, round(interes, 2), 0, round(saldo, 2))
-          } else {
-            # Después del diferimiento, pagos normales
-            interes <- saldo * tasa_periodo
-            amort <- pago - interes
-            saldo <- saldo - amort
-            tabla[t + 1, ] <- c(t, round(pago, 2), round(interes, 2), round(amort, 2), round(saldo, 2))
-          }
-        }
-        
-        if (isTRUE(ultimo_periodo_incompleto)) {
-          interes <- saldo * tasa_periodo
-          ultimo_pago <- saldo + interes
-          saldo <- 0
-          tabla[nrow(tabla) + 1, ] <- c(n_periodos + k + 1, round(ultimo_pago, 2), round(interes, 2), round(ultimo_pago, 2), round(saldo, 2))
-        }
-        
-        attr(tabla, "resultado") <- list(
-          capital = capital,
-          tasa = tasa_periodo * unidad_tasa_map[input$unidad_tasa] * 100,
-          n = if (exists("n_decimal")) n_decimal / unidad_periodo_map[input$unidad_periodo] else n_periodos / unidad_periodo_map[input$unidad_periodo],
-          pago = pago
-        )
-        
-        tabla <- na.omit(tabla)
-        return(tabla)
-      }
-      
-      
-     else if (input$tema == "TIR") {
+    } else if (input$tema == "TIR") {
       flujos <- as.numeric(unlist(strsplit(input$flujos, ",")))
       tir <- uniroot(function(r) sum(flujos / (1 + r)^(0:(length(flujos) - 1))), c(-0.99, 1))$root
       return(data.frame("TIR estimada (%)" = round(tir * 100, 2)))
@@ -405,6 +699,29 @@ server <- function(input, output) {
     return(NULL)
   })
   
+  output$mensajes <- renderUI({
+    if (input$tema != "Tablas de Amortización / Ahorro") return(NULL)
+    
+    valores <- obtener_valores_entrada(input)
+    
+    if (input$tipo_operacion == "Deuda") {
+      datos_faltantes <- sum(is.na(c(valores$capital, valores$tasa_periodo, valores$n_periodos, valores$pago)))
+      
+      if (datos_faltantes > 1) {
+        div(class = "error-message",
+            "Error: Has dejado más de un campo como 'Calculalo'. Solo debe haber uno.")
+      } else if (datos_faltantes == 0) {
+        div(class = "error-message",
+            "Error: Debes dejar exactamente un campo como 'Calculalo'.")
+      } else if (input$tipo_pago == "porcentajes") {
+        porcentajes <- as.numeric(unlist(strsplit(input$porcentajes_lista, ",")))
+        if (abs(sum(porcentajes) - 100) > 0.01) {
+          div(class = "error-message",
+              "Error: Los porcentajes deben sumar exactamente 100%")
+        }
+      }
+    }
+  })
   
   output$tabla <- renderDT({
     req(input$tema != "")
@@ -421,58 +738,10 @@ server <- function(input, output) {
   })
   output$resultado <- renderPrint({
     if (input$tema == "TIR") {
-      flujos <- as.numeric(unlist(strsplit(input$flujos, ",")))
-      tir <- uniroot(function(r) sum(flujos / (1 + r)^(0:(length(flujos) - 1))), c(-0.99, 1))$root
-      cat("La TIR es aproximadamente:", round(tir * 100, 2), "%")
+      mostrar_resultado_tir(input)
     } else if (input$tema == "Tablas de Amortización / Ahorro") {
-      tabla <- datos()
-      if (is.null(tabla) || "Error" %in% colnames(tabla)) return(NULL)
-      resumen <- attr(tabla, "resultado")
-      
-      cat("Resumen de la operación:\n")
-      
-      if (!is.null(resumen$capital) && is.numeric(resumen$capital)) {
-        cat("Monto presente/futuro:", round(resumen$capital, 2), "\n")
-      }
-      
-      if (!is.null(resumen$n) && is.numeric(resumen$n)) {
-        cat("Número de periodos:", round(resumen$n, 2), "\n")
-      }
-      
-      if (!is.null(resumen$pago)) {
-        if (is.numeric(resumen$pago)) {
-          cat("Pago periódico:", round(resumen$pago, 2), "\n")
-        } else {
-          cat("Pagos personalizados:", resumen$pago, "\n")
-        }
-      }
-      
-      # 🔹 Mostrar saldo insoluto si el usuario lo solicita
-      if (isTRUE(input$ver_saldo_especifico)) {
-        periodo <- input$periodo_consulta
-        if (periodo <= nrow(tabla) - 1 && "Saldo" %in% colnames(tabla)) {
-          saldo_periodo <- tabla[periodo + 1, "Saldo"]
-          cat("\nSaldo insoluto al final del periodo", periodo, ":", round(saldo_periodo, 2))
-        } else {
-          cat("\nPeriodo fuera del rango o sin datos.")
-        }
-      }
-      
-      # 🔹 Mostrar proporción amortizada si el usuario lo solicita
-      if (isTRUE(input$ver_proporcion_amortizada)) {
-        periodo <- input$periodo_amortizado
-        if (periodo <= nrow(tabla) - 1 && "Amortización" %in% colnames(tabla)) {
-          amort_acum <- sum(tabla[2:(periodo + 1), "Amortización"])
-          proporcion <- amort_acum / resumen$capital
-          cat("\nProporción del saldo amortizado al periodo", periodo, ":", round(proporcion * 100, 2), "%")
-          cat("\nMonto amortizado (derechos adquiridos): $", round(amort_acum, 2))
-        } else {
-          cat("\nPeriodo fuera del rango o sin datos para calcular la proporción amortizada.")
-        }
-      }
-      
+      mostrar_resultado_amortizacion(input, datos())
     }
-    
   })
   
 }
